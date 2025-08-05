@@ -7,6 +7,7 @@ import numba
 import numpy as np
 from functools import partial, reduce
 import uproot
+import ROOT as r
 
 import pepper
 
@@ -19,11 +20,14 @@ class Processor(pepper.ProcessorTTbarLL):
             ["genb", ["pt", "eta", "phi", "mass", "pdgId"]],
             ["genv", ["pt", "eta", "phi", "mass", "pdgId"]],
             ["genw", ["pt", "eta", "phi", "mass", "pdgId"]],
+            ["genS", ["pt", "eta", "phi", "mass", "pdgId"]],
+            ["genChi", ["pt", "eta", "phi", "mass", "pdgId"]],
             ["recolepton", ["pt", "eta", "phi", "mass", "pdgId"]],
             ["recot", ["pt", "eta", "phi", "mass"]],
             ["recob", ["pt", "eta", "phi", "mass"]],
             ["Jet", ["pt", "eta", "phi", "mass", "partonFlavour", "btagDeepFlavB"], {"leading": (1, 8)}],
             ["MET", ["pt", "phi"]],
+            ["dark_pt", ["x", "y"]],
             ["chel"],
             ["MT2ll"]
             # We do not need these for now
@@ -34,6 +38,7 @@ class Processor(pepper.ProcessorTTbarLL):
         ]
         if config["reco_algorithm"] == "both":
             config["columns_to_save"].append(["recot_sonn", ["pt", "eta", "phi", "mass"]])
+        self.mt2ll_script = "/nfs/dust/cms/user/stafford/coffea/2nd_repo/desy-ttbarbsm-coffea/pepper/MT2ll/lester_mt2_bisect.h"
         super().__init__(config, outdir)
 
     def process_selection(self, selector, dsname, is_mc, filler):
@@ -112,7 +117,12 @@ class Processor(pepper.ProcessorTTbarLL):
                 all_cuts=True, no_callback=True)
         selector.set_column("reconu", self.build_nu_column_ttbar_system,
                             all_cuts=True, lazy=True)
+        selector.set_column("dark_pt", self.calculate_dark_pt)
         selector.set_column("chel", self.calculate_chel)
+        if self.config["calculate_MT2"]:
+            selector.set_column("MT2ll", self.calculate_mT2ll)
+            if self.config["MT2ll_cut"]:
+                selector.add_cut("MT2ll cut", self.mT2ll_cut)
 
         selector.applying_cuts = False
         selector.add_cut("Req lep pT", self.lep_pt_requirement)
@@ -268,6 +278,14 @@ class Processor(pepper.ProcessorTTbarLL):
         antinu = antitop - antib - lep
         return ak.concatenate([nu, antinu], axis=1)
 
+    def calculate_dark_pt(self, data):
+        """Get the pt of the four vector difference of the MET and the
+        neutrinos"""
+        nu = data["reconu"][:, 0]
+        antinu = data["reconu"][:, 1]
+        met = data["MET"]
+        return met - nu - antinu
+
     def calculate_chel(self, data):
         """Calculate the angle between the leptons in their helicity frame"""
         top = data["recot"]
@@ -282,6 +300,29 @@ class Processor(pepper.ProcessorTTbarLL):
 
         chel = lep_ZMFtbar.dot(lbar_ZMFtop) / lep_ZMFtbar.rho / lbar_ZMFtop.rho
         return chel
+
+    def calculate_mT2ll(self, data):
+        if not hasattr(r, "asymm_mt2_lester_bisect"):
+            # Compile the code for the mt2 calculation, if we haven't already done so
+            r.gROOT.ProcessLine(".L " + self.mt2ll_script + "+")
+            try:
+                r.asymm_mt2_lester_bisect.disableCopyrightMessage()
+            except:
+                pass
+        leps = data["Lepton"]
+        p1 = leps[:, 0]
+        p2 = leps[:, 1]
+        MET = data["MET"]
+        mT2 = np.empty(len(data))
+        #Maybe this for loop could be moved into C?
+        for i in range(len(p1)):
+            mT2[i] = r.asymm_mt2_lester_bisect.get_mT2(np.abs(p1[i].mass), p1[i].x, p1[i].y,
+                                                       np.abs(p2[i].mass), p2[i].x, p2[i].y,
+                                                       MET[i].x, MET[i].y, 0, 0, 0)
+        return mT2
+
+    def mT2ll_cut(self, data):
+        return (data["MT2ll"] > self.config["MT2ll_cut"])
 
 if __name__ == "__main__":
     from pepper import runproc

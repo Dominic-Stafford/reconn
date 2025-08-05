@@ -163,6 +163,8 @@ def compute_sdmc(sdmb):
 def make_table(ev, weight, include_DM=False):
     sel = ((ak.num(ev["gent"]) == 2) & (ak.num(ev["genw"]) == 2)
            & (ak.num(ev["genb"]) == 2) & (ak.num(ev["genlepton"]) == 2))
+    if include_DM:
+        sel = (sel & (ak.num(ev["genChi"]) == 2))
     ev = ev[sel]
     weight = weight[sel]
     top = ak.with_name(ev["gent"][:, 0],
@@ -188,6 +190,12 @@ def make_table(ev, weight, include_DM=False):
     recoatop = ak.with_name(ev["recot"][:, 1:2],
                             "PtEtaPhiMLorentzVector")
     recoatop["mass"] = 172.5
+    sonn_top = ak.with_name(ev["recot_sonn"][:, 0:1],
+                           "PtEtaPhiMLorentzVector")
+    sonn_top["mass"] = 172.5
+    sonn_atop = ak.with_name(ev["recot_sonn"][:, 1:2],
+                            "PtEtaPhiMLorentzVector")
+    sonn_atop["mass"] = 172.5
     recolep = ak.with_name(ev["recolepton"][:, 0],
                            "PtEtaPhiMLorentzVector")
     recoalep = ak.with_name(ev["recolepton"][:, 1],
@@ -198,6 +206,11 @@ def make_table(ev, weight, include_DM=False):
                             "PtEtaPhiMLorentzVector")
     recomet = ak.with_name(ev["MET"], "PtEtaPhiMLorentzVector")
     recojet = ak.with_name(ev["Jet"], "PtEtaPhiMLorentzVector")
+    if include_DM:
+        dm_chi = ak.with_name(ev["genChi"][['pt', 'eta', 'phi', 'mass']][:, 0], "PtEtaPhiMLorentzVector")
+        dm_chibar = ak.with_name(ev["genChi"][['pt', 'eta', 'phi', 'mass']][:, 1], "PtEtaPhiMLorentzVector")
+        dm_med = dm_chi + dm_chibar
+    dark_pt = ak.with_name(ev["dark_pt"], "TwoVector")
     table = ak.Array({
         "mtt": (top + atop).mass,
         "weight": weight
@@ -232,6 +245,8 @@ def make_table(ev, weight, include_DM=False):
     add_particle(table, "met", recomet, "cartesian_transverse")
     add_particle(table, "sonnentop", sonn_top, "cartesian")
     add_particle(table, "sonnenatop", sonn_atop, "cartesian")
+    add_particle(table, "betchtop", recotop, "cartesian")
+    add_particle(table, "betchatop", recoatop, "cartesian")
     add_particle(table, "jet", recojet, "cartesian")
     add_particle(table, "jet", recojet, "ptetaphim")
     table["mtt"] = (top + atop).mass
@@ -243,6 +258,11 @@ def make_table(ev, weight, include_DM=False):
     add_particle(table, "genlephel", lep_hel, "ptetaphi")
     add_particle(table, "genalephel", alep_hel, "cartesian")
     add_particle(table, "genalephel", alep_hel, "ptetaphi")
+    table["dark_pt"] = dark_pt.pt
+    table["dark_phi"] = dark_pt.phi
+    table["MT2ll"] = ev["MT2ll"]
+    if include_DM:
+        add_particle(table, "gendmmed", dm_med, "cartesian")
 
     if args.skim is not None:
         table["weight"] = table["weight"] * args.skim
@@ -282,20 +302,37 @@ for fname in tqdm(glob.glob(os.path.join(dirname, "*.h5"))):
     if events_needed is not None and events_needed <= 0:
         break
     with HDF5File(fname, "r") as a:
-        ev = a["events"][:events_needed]
-        if args.cuts:
-            passes_cuts = np.all([np.asarray(a["cutflags"][field]) for field in a["cutflags"].fields], axis=0)
-            passes_cuts = passes_cuts[:events_needed]
-            ev = ev[passes_cuts]
-        if "systematics" in a:
-            weight = a["systematics"][:events_needed]["weight"]
+        if "dataset" in ak.fields(a["categories"]):
+            for ds in ak.fields(a["categories"]["dataset"]):
+                ev = a["events"][a["categories"]["dataset"][ds]][:events_needed]
+                if args.cuts:
+                    passes_cuts = np.all([np.asarray(a["cutflags"][field]) for field in a["cutflags"].fields], axis=0)
+                    passes_cuts = passes_cuts[a["categories"]["dataset"][ds]][:events_needed]
+                    ev = ev[passes_cuts]
+                if "systematics" in a:
+                    weight = a["systematics"][a["categories"]["dataset"][ds]][:events_needed]["weight"]
+                else:
+                    weight = a["weight"][a["categories"]["dataset"][ds]][:events_needed]
+                if args.cuts:
+                    weight = weight[passes_cuts]
+                weight = weight * scale
+                tables[ds].append(make_table(ev, weight, True))
+                nevt = len(tables[ds][-1])
         else:
-            weight = a["weight"][:events_needed]
-        if args.cuts:
-            weight = weight[passes_cuts]
-        weight = weight * scale
-        tables[dirname.split("/")[-1]].append(make_table(ev, weight))
-        nevt = len(tables[dirname.split("/")[-1]][-1])
+            ev = a["events"][:events_needed]
+            if args.cuts:
+                passes_cuts = np.all([np.asarray(a["cutflags"][field]) for field in a["cutflags"].fields], axis=0)
+                passes_cuts = passes_cuts[:events_needed]
+                ev = ev[passes_cuts]
+            if "systematics" in a:
+                weight = a["systematics"][:events_needed]["weight"]
+            else:
+                weight = a["weight"][:events_needed]
+            if args.cuts:
+                weight = weight[passes_cuts]
+            weight = weight * scale
+            tables[dirname.split("/")[-1]].append(make_table(ev, weight))
+            nevt = len(tables[dirname.split("/")[-1]][-1])
         if events_needed is not None:
             events_needed -= nevt
             if events_needed < 0:
